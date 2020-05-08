@@ -1,8 +1,10 @@
 package ss
 
 import (
+	"errors"
 	"net"
 
+	"github.com/nadoo/glider/common/pool"
 	"github.com/nadoo/glider/common/socks"
 )
 
@@ -32,13 +34,18 @@ func (pc *PktConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		return pc.PacketConn.ReadFrom(b)
 	}
 
-	buf := make([]byte, len(b))
+	buf := pool.GetBuffer(len(b))
+	defer pool.PutBuffer(buf)
+
 	n, raddr, err := pc.PacketConn.ReadFrom(buf)
 	if err != nil {
 		return n, raddr, err
 	}
 
 	tgtAddr := socks.SplitAddr(buf)
+	if tgtAddr == nil {
+		return n, raddr, errors.New("can not get addr")
+	}
 	copy(b, buf[len(tgtAddr):])
 
 	//test
@@ -59,7 +66,9 @@ func (pc *PktConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return pc.PacketConn.WriteTo(b, addr)
 	}
 
-	buf := make([]byte, len(pc.tgtAddr)+len(b))
+	buf := pool.GetBuffer(len(pc.tgtAddr) + len(b))
+	pool.PutBuffer(buf)
+
 	copy(buf, pc.tgtAddr)
 	copy(buf[len(pc.tgtAddr):], b)
 

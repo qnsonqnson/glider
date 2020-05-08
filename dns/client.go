@@ -31,8 +31,8 @@ type Client struct {
 	proxy       proxy.Proxy
 	cache       *Cache
 	config      *Config
-	upServers   []string
-	upServerMap map[string][]string
+	upStream    *UPStream
+	upStreamMap map[string]*UPStream
 	handlers    []HandleFunc
 }
 
@@ -42,8 +42,8 @@ func NewClient(proxy proxy.Proxy, config *Config) (*Client, error) {
 		proxy:       proxy,
 		cache:       NewCache(),
 		config:      config,
-		upServers:   config.Servers,
-		upServerMap: make(map[string][]string),
+		upStream:    NewUPStream(config.Servers),
+		upStreamMap: make(map[string]*UPStream),
 	}
 
 	// custom records
@@ -89,8 +89,22 @@ func (c *Client) Exchange(reqBytes []byte, clientAddr string, preferTCP bool) ([
 		return respBytes, err
 	}
 
+	ips, ttl := c.extractAnswer(resp)
+
+	// add to cache only when there's a valid ip address
+	if len(ips) != 0 && ttl > 0 {
+		c.cache.Put(getKey(resp.Question), respBytes, ttl)
+	}
+
+	log.F("[dns] %s <-> %s(%s) via %s, type: %d, %s: %s",
+		clientAddr, dnsServer, network, dialerAddr, resp.Question.QTYPE, resp.Question.QNAME, strings.Join(ips, ","))
+
+	return respBytes, nil
+}
+
+func (c *Client) extractAnswer(resp *Message) ([]string, int) {
+	var ips []string
 	ttl := c.config.MinTTL
-	ips := []string{}
 	for _, answer := range resp.Answers {
 		if answer.TYPE == QTypeA || answer.TYPE == QTypeAAAA {
 			for _, h := range c.handlers {
@@ -111,15 +125,7 @@ func (c *Client) Exchange(reqBytes []byte, clientAddr string, preferTCP bool) ([
 		ttl = c.config.MinTTL
 	}
 
-	// add to cache only when there's a valid ip address
-	if len(ips) != 0 && ttl > 0 {
-		c.cache.Put(getKey(resp.Question), respBytes, ttl)
-	}
-
-	log.F("[dns] %s <-> %s(%s) via %s, type: %d, %s: %s",
-		clientAddr, dnsServer, network, dialerAddr, resp.Question.QTYPE, resp.Question.QNAME, strings.Join(ips, ","))
-
-	return respBytes, nil
+	return ips, ttl
 }
 
 // exchange choose a upstream dns server based on qname, communicate with it on the network.
@@ -142,18 +148,24 @@ func (c *Client) exchange(qname string, reqBytes []byte, preferTCP bool) (
 		network = "udp"
 	}
 
-	servers := c.GetServers(qname)
-	for _, server = range servers {
+	ups := c.UpStream(qname)
+	server = ups.Server()
+	for i := 0; i < ups.Len(); i++ {
 		var rc net.Conn
 		rc, err = dialer.Dial(network, server)
 		if err != nil {
-			log.F("[dns] failed to connect to server %v: %v", server, err)
+			newServer := ups.SwitchIf(server)
+			log.F("[dns] error in resolving %s, failed to connect to server %v via %s: %v, switch to %s",
+				qname, server, dialer.Addr(), err, newServer)
+			server = newServer
 			continue
 		}
 		defer rc.Close()
 
 		// TODO: support timeout setting for different upstream server
-		rc.SetDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
+		if c.config.Timeout > 0 {
+			rc.SetDeadline(time.Now().Add(time.Duration(c.config.Timeout) * time.Second))
+		}
 
 		switch network {
 		case "tcp":
@@ -166,7 +178,16 @@ func (c *Client) exchange(qname string, reqBytes []byte, preferTCP bool) (
 			break
 		}
 
-		log.F("[dns] failed to exchange with server %v: %v", server, err)
+		newServer := ups.SwitchIf(server)
+		log.F("[dns] error in resolving %s, failed to exchange with server %v via %s: %v, switch to %s",
+			qname, server, dialer.Addr(), err, newServer)
+
+		server = newServer
+	}
+
+	// if all dns upstreams failed, then maybe the forwarder is not available.
+	if err != nil {
+		c.proxy.Record(dialer, false)
 	}
 
 	return server, network, dialer.Addr(), respBytes, err
@@ -175,13 +196,11 @@ func (c *Client) exchange(qname string, reqBytes []byte, preferTCP bool) (
 // exchangeTCP exchange with server over tcp.
 func (c *Client) exchangeTCP(rc net.Conn, reqBytes []byte) ([]byte, error) {
 	if _, err := rc.Write(reqBytes); err != nil {
-		log.F("[dns] failed to write req message: %v", err)
 		return nil, err
 	}
 
 	var respLen uint16
 	if err := binary.Read(rc, binary.BigEndian, &respLen); err != nil {
-		log.F("[dns] failed to read response length: %v", err)
 		return nil, err
 	}
 
@@ -190,7 +209,6 @@ func (c *Client) exchangeTCP(rc net.Conn, reqBytes []byte) ([]byte, error) {
 
 	_, err := io.ReadFull(rc, respBytes[2:])
 	if err != nil {
-		log.F("[dns] error in read respMsg %s\n", err)
 		return nil, err
 	}
 
@@ -200,38 +218,37 @@ func (c *Client) exchangeTCP(rc net.Conn, reqBytes []byte) ([]byte, error) {
 // exchangeUDP exchange with server over udp.
 func (c *Client) exchangeUDP(rc net.Conn, reqBytes []byte) ([]byte, error) {
 	if _, err := rc.Write(reqBytes[2:]); err != nil {
-		log.F("[dns] failed to write req message: %v", err)
 		return nil, err
 	}
 
-	reqBytes = make([]byte, 2+UDPMaxLen)
-	n, err := rc.Read(reqBytes[2:])
+	respBytes := make([]byte, 2+UDPMaxLen)
+	n, err := rc.Read(respBytes[2:])
 	if err != nil {
 		return nil, err
 	}
-	binary.BigEndian.PutUint16(reqBytes[:2], uint16(n))
+	binary.BigEndian.PutUint16(respBytes[:2], uint16(n))
 
-	return reqBytes[:2+n], nil
+	return respBytes[:2+n], nil
 }
 
 // SetServers sets upstream dns servers for the given domain.
-func (c *Client) SetServers(domain string, servers ...string) {
-	c.upServerMap[domain] = append(c.upServerMap[domain], servers...)
+func (c *Client) SetServers(domain string, servers []string) {
+	c.upStreamMap[domain] = NewUPStream(servers)
 }
 
-// GetServers gets upstream dns servers for the given domain
-func (c *Client) GetServers(domain string) []string {
+// UpStream returns upstream dns server for the given domain.
+func (c *Client) UpStream(domain string) *UPStream {
 	domainParts := strings.Split(domain, ".")
 	length := len(domainParts)
 	for i := length - 1; i >= 0; i-- {
 		domain := strings.Join(domainParts[i:length], ".")
 
-		if servers, ok := c.upServerMap[domain]; ok {
-			return servers
+		if upstream, ok := c.upStreamMap[domain]; ok {
+			return upstream
 		}
 	}
 
-	return c.upServers
+	return c.upStream
 }
 
 // AddHandler adds a custom handler to handle the resolved result (A and AAAA).
@@ -288,7 +305,7 @@ func (c *Client) GenResponse(domain string, ip string) (*Message, error) {
 }
 
 func getKey(q *Question) string {
-	qtype := ""
+	var qtype string
 	switch q.QTYPE {
 	case QTypeA:
 		qtype = "A"

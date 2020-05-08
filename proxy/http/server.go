@@ -2,7 +2,6 @@ package http
 
 import (
 	"bufio"
-	"bytes"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/nadoo/glider/common/conn"
 	"github.com/nadoo/glider/common/log"
+	"github.com/nadoo/glider/common/pool"
 	"github.com/nadoo/glider/proxy"
 )
 
@@ -46,12 +46,14 @@ func (s *HTTP) Serve(cc net.Conn) {
 	defer cc.Close()
 
 	var c *conn.Conn
-	switch ccc := cc.(type) {
-	case *net.TCPConn:
-		ccc.SetKeepAlive(true)
-		c = conn.NewConn(ccc)
+	switch cc := cc.(type) {
 	case *conn.Conn:
-		c = ccc
+		c = cc
+	case *net.TCPConn:
+		cc.SetKeepAlive(true)
+		c = conn.NewConn(cc)
+	default:
+		c = conn.NewConn(cc)
 	}
 
 	req, err := parseRequest(c.Reader())
@@ -88,17 +90,17 @@ func (s *HTTP) servRequest(req *request, c *conn.Conn) {
 }
 
 func (s *HTTP) servHTTPS(r *request, c net.Conn) {
-	rc, p, err := s.proxy.Dial("tcp", r.uri)
+	rc, dialer, err := s.proxy.Dial("tcp", r.uri)
 	if err != nil {
 		c.Write([]byte(r.proto + " 502 ERROR\r\n\r\n"))
-		log.F("[http] %s <-> %s [c] via %s, error in dial: %v", c.RemoteAddr(), r.uri, p, err)
+		log.F("[http] %s <-> %s [c] via %s, error in dial: %v", c.RemoteAddr(), r.uri, dialer.Addr(), err)
 		return
 	}
 	defer rc.Close()
 
 	c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
 
-	log.F("[http] %s <-> %s [c] via %s", c.RemoteAddr(), r.uri, p)
+	log.F("[http] %s <-> %s [c] via %s", c.RemoteAddr(), r.uri, dialer.Addr())
 
 	_, _, err = conn.Relay(c, rc)
 	if err != nil {
@@ -106,20 +108,25 @@ func (s *HTTP) servHTTPS(r *request, c net.Conn) {
 			return // ignore i/o timeout
 		}
 		log.F("[http] relay error: %v", err)
+		s.proxy.Record(dialer, false)
 	}
 }
 
 func (s *HTTP) servHTTP(req *request, c *conn.Conn) {
-	rc, p, err := s.proxy.Dial("tcp", req.target)
+	rc, dialer, err := s.proxy.Dial("tcp", req.target)
 	if err != nil {
 		fmt.Fprintf(c, "%s 502 ERROR\r\n\r\n", req.proto)
-		log.F("[http] %s <-> %s via %s, error in dial: %v", c.RemoteAddr(), req.target, p, err)
+		log.F("[http] %s <-> %s via %s, error in dial: %v", c.RemoteAddr(), req.target, dialer.Addr(), err)
 		return
 	}
 	defer rc.Close()
 
+	buf := pool.GetWriteBuffer()
+	defer pool.PutWriteBuffer(buf)
+
 	// send request to remote server
-	_, err = rc.Write(req.Marshal())
+	req.WriteBuf(buf)
+	_, err = rc.Write(buf.Bytes())
 	if err != nil {
 		return
 	}
@@ -127,7 +134,10 @@ func (s *HTTP) servHTTP(req *request, c *conn.Conn) {
 	// copy the left request bytes to remote server. eg. length specificed or chunked body.
 	go func() {
 		if _, err := c.Reader().Peek(1); err == nil {
-			io.Copy(rc, c)
+			b := pool.GetBuffer(conn.TCPBufSize)
+			io.CopyBuffer(rc, c, b)
+			pool.PutBuffer(b)
+
 			rc.SetDeadline(time.Now())
 			c.SetDeadline(time.Now())
 		}
@@ -154,12 +164,14 @@ func (s *HTTP) servHTTP(req *request, c *conn.Conn) {
 	header.Set("Proxy-Connection", "close")
 	header.Set("Connection", "close")
 
-	var buf bytes.Buffer
-	writeStartLine(&buf, proto, code, status)
-	writeHeaders(&buf, header)
+	buf.Reset()
+	writeStartLine(buf, proto, code, status)
+	writeHeaders(buf, header)
 
 	log.F("[http] %s <-> %s", c.RemoteAddr(), req.target)
 	c.Write(buf.Bytes())
 
-	io.Copy(c, r)
+	b := pool.GetBuffer(conn.TCPBufSize)
+	io.CopyBuffer(c, r, b)
+	pool.PutBuffer(b)
 }

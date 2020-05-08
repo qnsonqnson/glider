@@ -13,21 +13,21 @@ const (
 	AuthPassword = 2
 )
 
-// SOCKS request commands as defined in RFC 1928 section 4.
+// SOCKS request commands as defined in RFC 1928 section 4
 const (
-	CmdConnect      = 1
-	CmdBind         = 2
-	CmdUDPAssociate = 3
+	CmdConnect      byte = 1
+	CmdBind         byte = 2
+	CmdUDPAssociate byte = 3
 )
 
-// SOCKS address types as defined in RFC 1928 section 5.
+// SOCKS address types as defined in RFC 1928 section 5
 const (
 	ATypIP4    = 1
 	ATypDomain = 3
 	ATypIP6    = 4
 )
 
-// MaxAddrLen is the maximum size of SOCKS address in bytes.
+// MaxAddrLen is the maximum size of SOCKS address in bytes
 const MaxAddrLen = 1 + 1 + 255 + 2
 
 // Errors are socks5 errors
@@ -129,7 +129,6 @@ func SplitAddr(b []byte) Addr {
 		addrLen = 1 + net.IPv6len + 2
 	default:
 		return nil
-
 	}
 
 	if len(b) < addrLen {

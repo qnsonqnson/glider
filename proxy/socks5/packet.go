@@ -1,9 +1,11 @@
 package socks5
 
 import (
+	"errors"
 	"net"
 
 	"github.com/nadoo/glider/common/log"
+	"github.com/nadoo/glider/common/pool"
 	"github.com/nadoo/glider/common/socks"
 )
 
@@ -30,7 +32,8 @@ func NewPktConn(c net.PacketConn, writeAddr net.Addr, tgtAddr socks.Addr, tgtHea
 
 	if ctrlConn != nil {
 		go func() {
-			buf := make([]byte, 1)
+			buf := pool.GetBuffer(1)
+			defer pool.PutBuffer(buf)
 			for {
 				_, err := ctrlConn.Read(buf)
 				if err, ok := err.(net.Error); ok && err.Timeout() {
@@ -51,10 +54,16 @@ func (pc *PktConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		return pc.PacketConn.ReadFrom(b)
 	}
 
-	buf := make([]byte, len(b))
+	buf := pool.GetBuffer(len(b))
+	defer pool.PutBuffer(buf)
+
 	n, raddr, err := pc.PacketConn.ReadFrom(buf)
 	if err != nil {
 		return n, raddr, err
+	}
+
+	if n < 3 {
+		return n, raddr, errors.New("not enough size to get addr")
 	}
 
 	// https://tools.ietf.org/html/rfc1928#section-7
@@ -64,6 +73,9 @@ func (pc *PktConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	// | 2  |  1   |  1   | Variable |    2     | Variable |
 	// +----+------+------+----------+----------+----------+
 	tgtAddr := socks.SplitAddr(buf[3:])
+	if tgtAddr == nil {
+		return n, raddr, errors.New("can not get addr")
+	}
 	copy(b, buf[3+len(tgtAddr):])
 
 	//test
@@ -84,8 +96,13 @@ func (pc *PktConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return pc.PacketConn.WriteTo(b, addr)
 	}
 
-	buf := append([]byte{0, 0, 0}, pc.tgtAddr...)
-	buf = append(buf, b[:]...)
+	buf := pool.GetBuffer(3 + len(pc.tgtAddr) + len(b))
+	defer pool.PutBuffer(buf)
+
+	copy(buf, []byte{0, 0, 0})
+	copy(buf[3:], pc.tgtAddr)
+	copy(buf[3+len(pc.tgtAddr):], b)
+
 	return pc.PacketConn.WriteTo(buf, pc.writeAddr)
 }
 

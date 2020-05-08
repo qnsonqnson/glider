@@ -1,22 +1,18 @@
 module github.com/nadoo/glider
 
-go 1.13
+go 1.14
 
 require (
-	github.com/klauspost/cpuid v1.2.1 // indirect
-	github.com/klauspost/reedsolomon v1.9.3 // indirect
-	github.com/nadoo/conflag v0.2.2
+	github.com/klauspost/reedsolomon v1.9.6 // indirect
+	github.com/mzz2017/shadowsocksR v0.0.0-20200126130347-721f53a7b15a
+	github.com/nadoo/conflag v0.2.3
 	github.com/nadoo/go-shadowsocks2 v0.1.2
-	github.com/nadoo/shadowsocksR v0.1.0
-	github.com/pkg/errors v0.8.1 // indirect
-	github.com/templexxx/cpufeat v0.0.0-20180724012125-cef66df7f161 // indirect
-	github.com/templexxx/xor v0.0.0-20181023030647-4e92f724b73b // indirect
-	github.com/tjfoc/gmsm v1.0.1 // indirect
-	github.com/xtaci/kcp-go v5.4.11+incompatible
-	github.com/xtaci/lossyconn v0.0.0-20190602105132-8df528c0c9ae // indirect
-	golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550
-	golang.org/x/net v0.0.0-20191014212845-da9a3fd4c582 // indirect
-	golang.org/x/sys v0.0.0-20191020212454-3e7259c5e7c2 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/tjfoc/gmsm v1.3.0 // indirect
+	github.com/xtaci/kcp-go/v5 v5.5.12
+	golang.org/x/crypto v0.0.0-20200429183012-4b2356b1ed79
+	golang.org/x/net v0.0.0-20200505041828-1ed23360d12c // indirect
+	golang.org/x/sys v0.0.0-20200501145240-bc7a7d42d5c3 // indirect
 )
 
 // Replace dependency modules with local developing copy

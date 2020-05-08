@@ -20,6 +20,7 @@ import (
 
 	"github.com/nadoo/glider/common/conn"
 	"github.com/nadoo/glider/common/log"
+	"github.com/nadoo/glider/common/pool"
 	"github.com/nadoo/glider/common/socks"
 	"github.com/nadoo/glider/proxy"
 )
@@ -103,23 +104,19 @@ func (s *Socks5) ListenAndServeTCP() {
 }
 
 // Serve serves a connection.
-func (s *Socks5) Serve(cc net.Conn) {
-	defer cc.Close()
+func (s *Socks5) Serve(c net.Conn) {
+	defer c.Close()
 
-	var c *conn.Conn
-	switch ccc := cc.(type) {
-	case *net.TCPConn:
-		ccc.SetKeepAlive(true)
-		c = conn.NewConn(ccc)
-	case *conn.Conn:
-		c = ccc
+	if c, ok := c.(*net.TCPConn); ok {
+		c.SetKeepAlive(true)
 	}
 
 	tgt, err := s.handshake(c)
 	if err != nil {
 		// UDP: keep the connection until disconnect then free the UDP socket
 		if err == socks.Errors[9] {
-			buf := make([]byte, 1)
+			buf := pool.GetBuffer(1)
+			defer pool.PutBuffer(buf)
 			// block here
 			for {
 				_, err := c.Read(buf)
@@ -135,14 +132,14 @@ func (s *Socks5) Serve(cc net.Conn) {
 		return
 	}
 
-	rc, p, err := s.proxy.Dial("tcp", tgt.String())
+	rc, dialer, err := s.proxy.Dial("tcp", tgt.String())
 	if err != nil {
-		log.F("[socks5] %s <-> %s via %s, error in dial: %v", c.RemoteAddr(), tgt, p, err)
+		log.F("[socks5] %s <-> %s via %s, error in dial: %v", c.RemoteAddr(), tgt, dialer.Addr(), err)
 		return
 	}
 	defer rc.Close()
 
-	log.F("[socks5] %s <-> %s via %s", c.RemoteAddr(), tgt, p)
+	log.F("[socks5] %s <-> %s via %s", c.RemoteAddr(), tgt, dialer.Addr())
 
 	_, _, err = conn.Relay(c, rc)
 	if err != nil {
@@ -150,6 +147,7 @@ func (s *Socks5) Serve(cc net.Conn) {
 			return // ignore i/o timeout
 		}
 		log.F("[socks5] relay error: %v", err)
+		s.proxy.Record(dialer, false)
 	}
 }
 
@@ -257,7 +255,9 @@ func (s *Socks5) DialUDP(network, addr string) (pc net.PacketConn, writeTo net.A
 	// send VER, NMETHODS, METHODS
 	c.Write([]byte{Version, 1, 0})
 
-	buf := make([]byte, socks.MaxAddrLen)
+	buf := pool.GetBuffer(socks.MaxAddrLen)
+	defer pool.PutBuffer(buf)
+
 	// read VER METHOD
 	if _, err := io.ReadFull(c, buf[:2]); err != nil {
 		return nil, nil, err

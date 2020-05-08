@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nadoo/glider/common/log"
+	"github.com/nadoo/glider/common/pool"
 	"github.com/nadoo/glider/proxy"
 )
 
@@ -24,12 +25,15 @@ type Server struct {
 // NewServer returns a new dns server.
 func NewServer(addr string, p proxy.Proxy, config *Config) (*Server, error) {
 	c, err := NewClient(p, config)
+	if err != nil {
+		return nil, err
+	}
+
 	s := &Server{
 		addr:   addr,
 		Client: c,
 	}
-
-	return s, err
+	return s, nil
 }
 
 // Start starts the dns forwarding server.
@@ -56,7 +60,8 @@ func (s *Server) ListenAndServeUDP(wg *sync.WaitGroup) {
 	log.F("[dns] listening UDP on %s", s.addr)
 
 	for {
-		reqBytes := make([]byte, 2+UDPMaxLen)
+		reqBytes := pool.GetBuffer(2 + UDPMaxLen)
+
 		n, caddr, err := c.ReadFrom(reqBytes[2:])
 		if err != nil {
 			log.F("[dns] local read error: %v", err)
@@ -72,6 +77,8 @@ func (s *Server) ListenAndServeUDP(wg *sync.WaitGroup) {
 
 		go func() {
 			respBytes, err := s.Client.Exchange(reqBytes[:2+n], caddr.String(), false)
+			defer pool.PutBuffer(reqBytes)
+
 			if err != nil {
 				log.F("[dns] error in exchange: %s", err)
 				return
@@ -122,7 +129,9 @@ func (s *Server) ServeTCP(c net.Conn) {
 		return
 	}
 
-	reqBytes := make([]byte, reqLen+2)
+	reqBytes := pool.GetBuffer(int(reqLen) + 2)
+	defer pool.PutBuffer(reqBytes)
+
 	_, err := io.ReadFull(c, reqBytes[2:])
 	if err != nil {
 		log.F("[dns-tcp] error in read reqBytes %s", err)
@@ -137,8 +146,8 @@ func (s *Server) ServeTCP(c net.Conn) {
 		return
 	}
 
-	if err := binary.Write(c, binary.BigEndian, respBytes); err != nil {
-		log.F("[dns-tcp] error in local write respBytes: %s", err)
+	if _, err := c.Write(respBytes); err != nil {
+		log.F("[dns-tcp] error in write respBytes: %s", err)
 		return
 	}
 }

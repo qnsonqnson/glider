@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"math/rand"
 	"net"
 	"strings"
@@ -14,18 +15,18 @@ import (
 // Messages carried by UDP are restricted to 512 bytes (not counting the IP
 // or UDP headers).  Longer messages are truncated and the TC bit is set in
 // the header.
-const UDPMaxLen = 512
+const UDPMaxLen = 510
 
 // HeaderLen is the length of dns msg header.
 const HeaderLen = 12
 
-// Message types
+// Message types.
 const (
 	Query    = 0
 	Response = 1
 )
 
-// Query types
+// Query types.
 const (
 	QTypeA    uint16 = 1  //ipv4
 	QTypeAAAA uint16 = 28 ///ipv6
@@ -34,7 +35,7 @@ const (
 // ClassINET .
 const ClassINET uint16 = 1
 
-// Message format
+// Message format:
 // https://tools.ietf.org/html/rfc1035#section-4.1
 // All communications inside of the domain protocol are carried in a single
 // format called a message.  The top level format of message is divided
@@ -89,29 +90,17 @@ func (m *Message) AddAnswer(rr *RR) error {
 
 // Marshal marshals message struct to []byte.
 func (m *Message) Marshal() ([]byte, error) {
-	var buf bytes.Buffer
+	buf := &bytes.Buffer{}
 
 	m.Header.SetQdcount(1)
 	m.Header.SetAncount(len(m.Answers))
 
-	b, err := m.Header.Marshal()
-	if err != nil {
-		return nil, err
-	}
-	buf.Write(b)
-
-	b, err = m.Question.Marshal()
-	if err != nil {
-		return nil, err
-	}
-	buf.Write(b)
+	// no error when write to bytes.Buffer
+	m.Header.MarshalTo(buf)
+	m.Question.MarshalTo(buf)
 
 	for _, answer := range m.Answers {
-		b, err := answer.Marshal()
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(b)
+		answer.MarshalTo(buf)
 	}
 
 	return buf.Bytes(), nil
@@ -154,7 +143,7 @@ func UnmarshalMessage(b []byte) (*Message, error) {
 	return m, nil
 }
 
-// Header format
+// Header format:
 // https://tools.ietf.org/html/rfc1035#section-4.1.1
 // The header contains the following fields:
 //
@@ -208,11 +197,9 @@ func (h *Header) setFlag(QR uint16, Opcode uint16, AA uint16,
 	h.Bits = QR<<15 + Opcode<<11 + AA<<10 + TC<<9 + RD<<8 + RA<<7 + RCODE
 }
 
-// Marshal marshals header struct to []byte.
-func (h *Header) Marshal() ([]byte, error) {
-	var buf bytes.Buffer
-	err := binary.Write(&buf, binary.BigEndian, h)
-	return buf.Bytes(), err
+// MarshalTo marshals header struct to []byte and write to w.
+func (h *Header) MarshalTo(w io.Writer) (int, error) {
+	return HeaderLen, binary.Write(w, binary.BigEndian, h)
 }
 
 // UnmarshalHeader unmarshals []bytes to Header.
@@ -235,7 +222,7 @@ func UnmarshalHeader(b []byte, h *Header) error {
 	return nil
 }
 
-// Question format
+// Question format:
 // https://tools.ietf.org/html/rfc1035#section-4.1.2
 // The question section is used to carry the "question" in most queries,
 // i.e., the parameters that define what is being asked.  The section
@@ -267,15 +254,15 @@ func NewQuestion(qtype uint16, domain string) *Question {
 	}
 }
 
-// Marshal marshals Question struct to []byte.
-func (q *Question) Marshal() ([]byte, error) {
-	var buf bytes.Buffer
+// MarshalTo marshals Question struct to []byte and write to w.
+func (q *Question) MarshalTo(w io.Writer) (int, error) {
+	n, _ := MarshalDomainTo(w, q.QNAME)
 
-	buf.Write(MarshalDomain(q.QNAME))
-	binary.Write(&buf, binary.BigEndian, q.QTYPE)
-	binary.Write(&buf, binary.BigEndian, q.QCLASS)
+	binary.Write(w, binary.BigEndian, q.QTYPE)
+	binary.Write(w, binary.BigEndian, q.QCLASS)
+	n += 4
 
-	return buf.Bytes(), nil
+	return n, nil
 }
 
 // UnmarshalQuestion unmarshals []bytes to Question.
@@ -300,7 +287,7 @@ func (m *Message) UnmarshalQuestion(b []byte, q *Question) (n int, err error) {
 	return idx + 3 + 1, nil
 }
 
-// RR format
+// RR format:
 // https://tools.ietf.org/html/rfc1035#section-3.2.1
 // https://tools.ietf.org/html/rfc1035#section-4.1.3
 // The answer, authority, and additional sections all share the same
@@ -341,22 +328,23 @@ type RR struct {
 
 // NewRR returns a new dns rr.
 func NewRR() *RR {
-	rr := &RR{}
-	return rr
+	return &RR{}
 }
 
-// Marshal marshals RR struct to []byte.
-func (rr *RR) Marshal() ([]byte, error) {
-	var buf bytes.Buffer
+// MarshalTo marshals RR struct to []byte and write to w.
+func (rr *RR) MarshalTo(w io.Writer) (int, error) {
+	n, _ := MarshalDomainTo(w, rr.NAME)
 
-	buf.Write(MarshalDomain(rr.NAME))
-	binary.Write(&buf, binary.BigEndian, rr.TYPE)
-	binary.Write(&buf, binary.BigEndian, rr.CLASS)
-	binary.Write(&buf, binary.BigEndian, rr.TTL)
-	binary.Write(&buf, binary.BigEndian, rr.RDLENGTH)
-	buf.Write(rr.RDATA)
+	binary.Write(w, binary.BigEndian, rr.TYPE)
+	binary.Write(w, binary.BigEndian, rr.CLASS)
+	binary.Write(w, binary.BigEndian, rr.TTL)
+	binary.Write(w, binary.BigEndian, rr.RDLENGTH)
+	n += 10
 
-	return buf.Bytes(), nil
+	w.Write(rr.RDATA)
+	n += len(rr.RDATA)
+
+	return n, nil
 }
 
 // UnmarshalRR unmarshals []bytes to RR.
@@ -399,23 +387,23 @@ func (m *Message) UnmarshalRR(start int, rr *RR) (n int, err error) {
 	return n, nil
 }
 
-// MarshalDomain marshals domain string struct to []byte.
-func MarshalDomain(domain string) []byte {
-	var buf bytes.Buffer
-
+// MarshalDomainTo marshals domain string struct to []byte and write to w.
+func MarshalDomainTo(w io.Writer, domain string) (int, error) {
+	n := 1
 	for _, seg := range strings.Split(domain, ".") {
-		binary.Write(&buf, binary.BigEndian, byte(len(seg)))
-		binary.Write(&buf, binary.BigEndian, []byte(seg))
+		binary.Write(w, binary.BigEndian, byte(len(seg)))
+		binary.Write(w, binary.BigEndian, []byte(seg))
+		n += 1 + len(seg)
 	}
-	binary.Write(&buf, binary.BigEndian, byte(0x00))
+	binary.Write(w, binary.BigEndian, byte(0x00))
 
-	return buf.Bytes()
+	return n, nil
 }
 
 // UnmarshalDomain gets domain from bytes.
 func (m *Message) UnmarshalDomain(b []byte) (string, int, error) {
 	var idx, size int
-	var labels = []string{}
+	var labels []string
 
 	for {
 		// https://tools.ietf.org/html/rfc1035#section-4.1.4
@@ -423,7 +411,10 @@ func (m *Message) UnmarshalDomain(b []byte) (string, int, error) {
 		// +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
 		// | 1  1|                OFFSET                   |
 		// +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-		if b[idx]&0xC0 == 0xC0 {
+		if len(b[idx:]) == 0 {
+			break
+
+		} else if b[idx]&0xC0 == 0xC0 {
 			offset := binary.BigEndian.Uint16(b[idx : idx+2])
 			label, err := m.UnmarshalDomainPoint(int(offset & 0x3FFF))
 			if err != nil {
@@ -433,10 +424,13 @@ func (m *Message) UnmarshalDomain(b []byte) (string, int, error) {
 			labels = append(labels, label)
 			idx += 2
 			break
+
 		} else {
 			size = int(b[idx])
+			idx++
+
+			// root domain name
 			if size == 0 {
-				idx++
 				break
 			}
 
@@ -444,13 +438,14 @@ func (m *Message) UnmarshalDomain(b []byte) (string, int, error) {
 				return "", 0, errors.New("UnmarshalDomain: label size larger than 63")
 			}
 
-			if idx+size+1 > len(b) {
+			if idx+size > len(b) {
 				return "", 0, errors.New("UnmarshalDomain: label size larger than msg length")
 			}
 
-			labels = append(labels, string(b[idx+1:idx+size+1]))
-			idx += (size + 1)
+			labels = append(labels, string(b[idx:idx+size]))
+			idx += size
 		}
+
 	}
 
 	domain := strings.Join(labels, ".")
